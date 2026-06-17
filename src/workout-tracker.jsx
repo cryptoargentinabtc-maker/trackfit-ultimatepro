@@ -1,4 +1,9 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import {
+  loadHistory, saveSession, deleteSession,
+  loadBodyLog, saveBodyEntry, deleteBodyEntry,
+  loadSuppLog, saveSuppLog,
+} from "./supabase.js";
 
 const boot = () => {
   if (document.getElementById("tfU")) return;
@@ -738,7 +743,7 @@ function SessionView({day,setDay,history,setHistory}){
 
       {editEx&&<ExEditor ex={editEx} phases={phases} onSave={saveEx} onClose={()=>setEditEx(null)} onDelete={()=>delEx(editEx.id)}/>}
       {addingEx&&<AddExModal phases={phases} onAdd={addEx} onClose={()=>setAddingEx(false)}/>}
-      {logEx&&<LogModal exercise={logEx} history={history} onSave={entry=>setHistory(p=>[entry,...p])} onClose={()=>setLogEx(null)}/>}
+      {logEx&&<LogModal exercise={logEx} history={history} onSave={entry=>{setHistory(entry);}} onClose={()=>setLogEx(null)}/>}
       {timer!=null&&<RestTimer seconds={timer} onClose={()=>setTimer(null)}/>}
     </div>
   );
@@ -799,7 +804,7 @@ function LineChart({data,color,unit,label}){
 }
 
 /* ─── TRACKER VIEW ───────────────────────────────────────── */
-function TrackerView({history,bodyLog,setBodyLog}){
+function TrackerView({history,bodyLog,onAddBody=()=>{},onDeleteBody=()=>{}}){
   const[selKey,setSelKey]=useState("all");
   const[bwInput,setBwInput]=useState("");
   const[bwSaved,setBwSaved]=useState(false);
@@ -835,7 +840,7 @@ function TrackerView({history,bodyLog,setBodyLog}){
 
   function saveBW(){
     if(!bwInput) return;
-    setBodyLog(p=>[{id:uid(),date:ts,weight:Number(bwInput)},...p.filter(b=>b.date!==ts)]);
+    const entry={id:uid(),date:ts,weight:Number(bwInput)};onAddBody(entry);
     setBwInput("");setBwSaved(true);setTimeout(()=>setBwSaved(false),1500);
   }
 
@@ -962,7 +967,7 @@ function TrackerView({history,bodyLog,setBodyLog}){
 }
 
 /* ─── HISTORY VIEW ───────────────────────────────────────── */
-function HistoryView({history,setHistory}){
+function HistoryView({history,onDelete=()=>{}}){
   const[filterKey,setFilterKey]=useState("all");
   const[expandedId,setExpandedId]=useState(null);
   const keys=[...new Set(history.map(h=>h.liftKey))];
@@ -1046,7 +1051,7 @@ function HistoryView({history,setHistory}){
                   ))}
                 </div>
                 {entry.notes&&<div style={{fontSize:11,color:T.muted,fontStyle:"italic",paddingTop:8,borderTop:`1px solid ${T.border}`,lineHeight:1.5}}>💬 {entry.notes}</div>}
-                <button onClick={()=>setHistory(p=>p.filter(h=>h.id!==entry.id))} className="tap"
+                <button onClick={()=>onDelete(entry.id)} className="tap"
                   style={{marginTop:10,background:T.red+"10",border:`1px solid ${T.red}22`,borderRadius:8,padding:"7px 14px",color:T.red,fontSize:11,fontWeight:600,cursor:"pointer"}}>
                   🗑 Eliminar
                 </button>
@@ -1061,10 +1066,10 @@ function HistoryView({history,setHistory}){
 }
 
 /* ─── SUPPLEMENTS ────────────────────────────────────────── */
-function SuppsView({suppLog,setSuppLog}){
+function SuppsView({suppLog,onToggle=()=>{}}){
   const ts=td();
   const tl=suppLog[ts]||{};
-  const tog=id=>setSuppLog(p=>{const d=p[ts]||{};return{...p,[ts]:{...d,[id]:{taken:!d[id]?.taken}}};});
+  const tog=id=>onToggle(ts,id,suppLog[ts]?.[id]?.taken||false);
   const streak=id=>{let s=0;for(let i=0;i<60;i++){const d=new Date();d.setDate(d.getDate()-i);const k=d.toISOString().split("T")[0];if(suppLog[k]?.[id]?.taken)s++;else if(i>0)break;}return s;};
   const weekA=id=>{let t=0;for(let i=0;i<7;i++){const d=new Date();d.setDate(d.getDate()-i);const k=d.toISOString().split("T")[0];if(suppLog[k]?.[id]?.taken)t++;}return t;};
   return(
@@ -1514,10 +1519,88 @@ export default function App(){
   const[tabKey,setTabKey]=useState(0);
   const[selectedIdx,setSelectedIdx]=useState(0);
   const[showExport,setShowExport]=useState(false);
+  const[loading,setLoading]=useState(true);
+  const[syncStatus,setSyncStatus]=useState("ok"); // "ok" | "syncing" | "error"
+
+  // Load all data from Supabase on mount
+  useEffect(()=>{
+    async function fetchAll(){
+      setLoading(true);
+      try{
+        const [h, b, s] = await Promise.all([loadHistory(), loadBodyLog(), loadSuppLog()]);
+        setHistory(h);
+        setBodyLog(b);
+        setSuppLog(s);
+      }catch(e){ console.error("Load error:",e); setSyncStatus("error"); }
+      setLoading(false);
+    }
+    fetchAll();
+  },[]);
+
+  // Wrapper: save session to Supabase + update local state
+  async function addSession(entry){
+    setSyncStatus("syncing");
+    try{
+      await saveSession(entry);
+      setHistory(p=>[entry,...p]);
+      setSyncStatus("ok");
+    }catch(e){ console.error(e); setSyncStatus("error"); }
+  }
+
+  // Wrapper: delete session
+  async function removeSession(id){
+    setSyncStatus("syncing");
+    try{
+      await deleteSession(id);
+      setHistory(p=>p.filter(h=>h.id!==id));
+      setSyncStatus("ok");
+    }catch(e){ console.error(e); setSyncStatus("error"); }
+  }
+
+  // Wrapper: save body entry
+  async function addBodyEntry(entry){
+    setSyncStatus("syncing");
+    try{
+      await saveBodyEntry(entry);
+      setBodyLog(p=>[entry,...p.filter(b=>b.date!==entry.date)]);
+      setSyncStatus("ok");
+    }catch(e){ console.error(e); setSyncStatus("error"); }
+  }
+
+  // Wrapper: delete body entry
+  async function removeBodyEntry(id){
+    setSyncStatus("syncing");
+    try{
+      await deleteBodyEntry(id);
+      setBodyLog(p=>p.filter(b=>b.id!==id));
+      setSyncStatus("ok");
+    }catch(e){ console.error(e); setSyncStatus("error"); }
+  }
+
+  // Wrapper: toggle supplement
+  async function toggleSupp(date, suppId, current){
+    const newVal = !current;
+    const newDate = { ...(suppLog[date]||{}), [suppId]:{ taken: newVal } };
+    const newLog = { ...suppLog, [date]: newDate };
+    setSuppLog(newLog);
+    setSyncStatus("syncing");
+    try{
+      await saveSuppLog(date, newDate);
+      setSyncStatus("ok");
+    }catch(e){ console.error(e); setSyncStatus("error"); }
+  }
 
   const go=id=>{setTab(id);setTabKey(k=>k+1);};
   const openDay=idx=>{setSelectedIdx(idx);go("session");};
   const updateDay=updated=>setWeek(w=>w.map((d,i)=>i===selectedIdx?updated:d));
+
+  if(loading) return(
+    <div style={{minHeight:"100vh",background:T.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16}}>
+      <BB s={32} c={T.acc} ls="0.06em">TRACK<span style={{color:T.text}}>FIT</span></BB>
+      <div style={{width:40,height:40,border:`3px solid ${T.acc}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
+      <MM s={11} c={T.muted}>Cargando datos...</MM>
+    </div>
+  );
 
   return(
     <div style={{minHeight:"100vh",background:T.bg,color:T.text,fontFamily:"'Inter',sans-serif",display:"flex",flexDirection:"column",maxWidth:480,margin:"0 auto"}}>
@@ -1532,7 +1615,11 @@ export default function App(){
             style={{background:T.green+"18",border:`1px solid ${T.green}30`,borderRadius:9,padding:"6px 11px",color:T.green,fontSize:11,fontWeight:700,cursor:"pointer"}}>
             📊 EXPORTAR
           </button>
-          <div style={{width:6,height:6,borderRadius:"50%",background:T.green,animation:"pulse 2s infinite",boxShadow:`0 0 8px ${T.green}`}}/>
+          <div style={{width:8,height:8,borderRadius:"50%",
+            background:syncStatus==="ok"?T.green:syncStatus==="syncing"?T.acc:T.red,
+            boxShadow:`0 0 8px ${syncStatus==="ok"?T.green:syncStatus==="syncing"?T.acc:T.red}`,
+            animation:syncStatus==="syncing"?"pulse 1s infinite":"none",
+            transition:"background .3s"}}/>
         </Row>
       </div>
 
@@ -1551,10 +1638,10 @@ export default function App(){
       {/* Content */}
       <div key={tabKey} className="up" style={{flex:1,overflowY:"auto",paddingBottom:80}}>
         {tab==="home"   &&<HomeView week={week} history={history} suppLog={suppLog} onSelectDay={openDay}/>}
-        {tab==="session"&&<SessionView day={week[selectedIdx]} setDay={updateDay} history={history} setHistory={setHistory}/>}
-        {tab==="tracker"&&<TrackerView history={history} bodyLog={bodyLog} setBodyLog={setBodyLog}/>}
-        {tab==="hist"   &&<HistoryView history={history} setHistory={setHistory}/>}
-        {tab==="supps"  &&<SuppsView suppLog={suppLog} setSuppLog={setSuppLog}/>}
+        {tab==="session"&&<SessionView day={week[selectedIdx]} setDay={updateDay} history={history} setHistory={e=>addSession(e)}/>}
+        {tab==="tracker"&&<TrackerView history={history} bodyLog={bodyLog} onAddBody={addBodyEntry} onDeleteBody={removeBodyEntry}/>}
+        {tab==="hist"   &&<HistoryView history={history} onDelete={removeSession}/>}
+        {tab==="supps"  &&<SuppsView suppLog={suppLog} onToggle={toggleSupp}/>}
       </div>
 
       {/* Bottom nav */}
